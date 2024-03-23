@@ -1,0 +1,125 @@
+# %%
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain_community.llms.octoai_endpoint import OctoAIEndpoint
+from langchain_community.embeddings import OctoAIEmbeddings
+from langchain_community.vectorstores import Milvus
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredPDFLoader
+from langchain.schema import Document
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.output_parsers import StrOutputParser
+from langchain.memory import ConversationBufferMemory
+import os
+from glob import glob
+from dotenv import load_dotenv
+
+# %%
+load_dotenv()
+os.environ["OCTOAI_API_TOKEN"] = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjNkMjMzOTQ5In0.eyJzdWIiOiI2Yzg0MjMyNy02ZmY4LTRkMzYtODNhNi02NWRjYjZiMDVjNjIiLCJ0eXBlIjoidXNlckFjY2Vzc1Rva2VuIiwidGVuYW50SWQiOiI2NjA4NmQzZS1iNWQyLTQxOTgtOGM0MS1hYWZjMmQ1MDAxM2UiLCJ1c2VySWQiOiI5OGQ3MDRjZC1hOWViLTQ4MjktOTQxZS0yZDA3N2VhYjU4NjMiLCJyb2xlcyI6WyJGRVRDSC1ST0xFUy1CWS1BUEkiXSwicGVybWlzc2lvbnMiOlsiRkVUQ0gtUEVSTUlTU0lPTlMtQlktQVBJIl0sImF1ZCI6IjNkMjMzOTQ5LWEyZmItNGFiMC1iN2VjLTQ2ZjYyNTVjNTEwZSIsImlzcyI6Imh0dHBzOi8vaWRlbnRpdHkub2N0b21sLmFpIiwiaWF0IjoxNzExMjEzMDUxfQ.ToHPKaVUUGtAFtKcqja-FhJxJiXNiggPkZ1ZsbNk0evngkw0m1Nes5hdt4hZF4Q7KqHa3kxAAmnwP-VUiW2RnByh6g0WOQWeffxIjwtbL17hGXQt3nJSs3XDfgluBKVyfcCeIoDjz56uciMeBSmFHrrh7asbtmij7CRDyn0DRfmZBEI7y6Psv8Tu2vwSmlyeUxzSqmu5iMNsRalndbeQaKOTQAtGtnp8zPVogivYc_L26iFApUg6EN01KU0GRGg8KdH6PgPF6sIuc5o5LsPHImKeFumgE9XO6W9GK0dYofQE2zLek1IRNhuQw25wDHm7Rmd54_Y0WH1OCqBGExGTBg"
+
+template = """Below is an instruction that describes a task. Write a response that appropriately completes the request.\n Instruction:\n{question}\n Response: """
+prompt = PromptTemplate.from_template(template)
+
+llm = OctoAIEndpoint(
+    endpoint_url="https://text.octoai.run/v1/chat/completions",
+    model_kwargs={
+        "model": "mixtral-8x7b-instruct-fp16",
+        "max_tokens": 128,
+        "presence_penalty": 0,
+        "temperature": 0.01,
+        "top_p": 0.9,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant. Keep your responses limited to one short paragraph if possible. Be very concise and provide only the answers.",
+            },
+        ],
+    },
+)
+
+# %%
+from pdfminer.high_level import extract_text
+
+path = r'./data/*.pdf'
+files = glob(path)
+documents = []
+# for file in files:
+#     text = extract_text(file)
+
+#     text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
+#         chunk_size=2000, chunk_overlap=64, 
+#     )
+#     texts = text_splitter.split_text(text)
+#     for i, chunked_text in enumerate(texts):
+#         documents.append(Document(page_content=chunked_text, 
+#             metadata={"doc_title": file.title().split("/")[-1].split(".")[0], "chunk_num": i}))
+
+# print(documents)
+
+import re
+for file in files:
+    file_text = extract_text(file)
+    # file_text = re.escape(text)
+    text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=512, chunk_overlap=64, 
+    )
+    texts = text_splitter.split_text(file_text)
+    for i, chunked_text in enumerate(texts):
+        documents.append(Document(page_content=chunked_text, 
+                metadata={"restaurant_name": file.title().split("/")[-1].split(".")[0], "chunk_num": i}))
+        
+# documents
+
+
+# %%
+embeddings = OctoAIEmbeddings(endpoint_url="https://text.octoai.run/v1/embeddings")
+
+vector_store = Milvus.from_documents(
+    documents,
+    embedding=embeddings,
+    connection_args={"host": "localhost", "port": 19530},
+    collection_name="restaurants"
+)
+
+# %%
+retriever = vector_store.as_retriever()
+chat_history = ""
+template = """Answer the question based only on the following context:
+{context}
+
+Answer concisely without preamble.
+
+Question: {question}
+"""
+prompt = PromptTemplate.from_template(template)
+
+# messages = []
+# def get_messages(_):
+#     return messages
+
+chain = (
+    {"context": retriever, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+# %%
+user_input = ''
+while user_input != 'quit':
+    user_input = input("Enter a query (or 'quit'): ")
+    if user_input != 'quit':
+        print("USER: " + user_input + "\n\n")
+        # messages.append("USER: " + user_input + "\n")
+        response = chain.invoke(user_input)
+        print("RESPONSE: " + response + "\n\n")
+        # messages.append("ASSISTANT: " + response + "\n")
+        # print(response)
+        # print(response)
+
+
+# %%
+
+
+
